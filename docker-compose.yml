@@ -24,15 +24,15 @@ services:
       - PYTHONUNBUFFERED=1
       - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     restart: unless-stopped
-    # deploy:
-    #   resources:
-    #     limits:
-    #       memory: 3g
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
+    deploy:
+      resources:
+        limits:
+          memory: 3g
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
 # Define named volumes
 volumes:
