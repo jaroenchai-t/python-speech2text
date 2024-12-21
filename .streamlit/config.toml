@@ -1,0 +1,8 @@
+
+[server]
+maxUploadSize = 1000  # Size in MB
+maxMessageSize = 1000
+
+[browser]
+serverTimeout = 300  # Timeout in seconds
+    

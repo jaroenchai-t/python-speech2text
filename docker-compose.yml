@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  streamlit-app:
+    image: registry.gitlab.com/jaroechai/speechtotext:demo
+    ports:
+      - "8501:8501"
+    volumes:
+      # Use named volumes for better persistence and cross-platform compatibility
+      - model_cache:/app/models
+      - data_cache:/app/data
+      - log_cache:/app/logs
+      - pip_cache:/root/.cache/pip
+      # Mount source code for development
+      - .:/app
+    environment:
+      - MODEL_PATH=/app/models
+      - TORCH_HOME=/app/models
+      - HF_HOME=/app/models/huggingface
+      - HUGGING_FACE_HUB_TOKEN=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
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+# Define named volumes
+volumes:
+  model_cache:
+  data_cache:
+  log_cache:
+  pip_cache:
