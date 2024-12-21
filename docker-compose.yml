@@ -22,14 +22,17 @@ services:
       - HF_HOME=/app/models/huggingface
       - HUGGING_FACE_HUB_TOKEN=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
       - PYTHONUNBUFFERED=1
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     restart: unless-stopped
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 3g
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
 
 # Define named volumes
 volumes:

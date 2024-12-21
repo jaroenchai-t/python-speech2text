@@ -4,8 +4,6 @@ import gc
 import os
 from pathlib import Path
 import re
-
-import torch
 from lib.AudioDiarization import AudioDiarization
 from lib.VideoToMp3 import VideoToMp3
 from lib.Wisper_OpenAI import WhisperOpenAI
@@ -14,31 +12,31 @@ import tempfile
 class TranscriptWorker:
     _instance = None
     _initialized = False
+    transcript=None
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(TranscriptWorker, cls).__new__(cls)
+            cls._instance._initialize()
         return cls._instance
-    def __init__(self):
-        if not TranscriptWorker._initialized:
+    def _check_wisper(self):
+        if self.transcript is None:
+            self.transcript = WhisperOpenAI()
+        return self.transcript 
+
+    def _initialize(self):
             self.Diarization = AudioDiarization()
             self.VideoToMp3 = VideoToMp3()
-            self.transcript = WhisperOpenAI()
+            #self.transcript = WhisperOpenAI()
             self.output_dir = Path(tempfile.gettempdir()) / 'video_processing'/'output'
             self.output_dir.mkdir(exist_ok=True)
                     # Set PyTorch memory management
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            # if torch.cuda.is_available():
+            #     torch.cuda.empty_cache()
                 # Try to enable memory efficient attention
-                os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+            #os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
             print("TranscriptWorker initialized")
-        else:
-            print("Using existing TranscriptWorker instance")
+        
 
-    def _clear_gpu_memory(self):
-        """Clear GPU memory cache"""
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            gc.collect()
     def process_convert_to_audit(self,video_path):
             output_video = os.path.basename(video_path).split(".")[0]
             audio_folder=os.path.join(self.output_dir , output_video)
@@ -49,7 +47,7 @@ class TranscriptWorker:
         
             return output_audio_path
     def diarization(self,output_audio_path):
-        self._clear_gpu_memory()
+        #self._clear_gpu_memory()
         output_video_name = os.path.basename(output_audio_path).split(".")[0]
         audio_diarization=os.path.join(self.output_dir , output_video_name)
         os.makedirs(audio_diarization, exist_ok=True)
@@ -65,7 +63,7 @@ class TranscriptWorker:
         self.Diarization.SplitAudio(output_audio_path,output_detection_path,autio_out_shunk)
         return autio_out_shunk
     def transcribe(self, audio_chunk_path: str):
-        self._clear_gpu_memory()
+        self._check_wisper();
         return self.transcript.transcribe(audio_chunk_path)
 
     def clean_repeated_words(self,text):

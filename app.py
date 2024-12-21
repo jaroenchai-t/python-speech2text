@@ -25,8 +25,8 @@ def init_session_state():
         st.session_state.start_time = None
     if 'estimated_time' not in st.session_state:
         st.session_state.estimated_time = None
-    if 'transcript_worker' not in st.session_state:
-        st.session_state.transcript_worker = TranscriptWorker()
+ 
+
 
 class SystemLock:
     def __init__(self):
@@ -196,7 +196,7 @@ serverTimeout = 300  # Timeout in seconds
         f.write(config_content)
 
 temp = TempFileManager()
- 
+transcript_worker = TranscriptWorker()
 def main():
     init_session_state()
     st.title("Video Processing Pipeline")
@@ -217,8 +217,7 @@ def main():
         st.sidebar.write(f"Estimated time: {status['estimated_time']} minutes")
     else:
         st.sidebar.success("🟢 System Ready")
-    # Clean temp directory on startup
-    temp.cleanup_directory()
+    
     
     uploaded_file = st.file_uploader("Choose a video file", type=['mp4', 'avi', 'mov'])
     
@@ -234,6 +233,8 @@ def main():
         
         if st.button("Process Video"):
             if not status['is_busy']:
+                # Clean temp directory on startup
+                temp.cleanup_directory()
                 # Set system as busy
                 estimated_time = len(uploaded_file.getvalue()) / (1024 * 1024 * 60)  # Rough estimate
                 st.session_state.system_lock.set_busy(st.session_state.user_id, estimated_time)
@@ -245,7 +246,7 @@ def main():
                 transcript_container = st.empty()
                 
                 try:
-                    transcript_worker = st.session_state.transcript_worker
+                  
                     # Save file to temp directory
                     temp_file_path = temp.save_uploaded_file(uploaded_file)
                     status_placeholder.success("Video uploaded successfully!")

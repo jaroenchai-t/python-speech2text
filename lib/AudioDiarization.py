@@ -1,5 +1,4 @@
 import gc
-import torch
 from pyannote.audio import Pipeline
 import os
 import warnings
@@ -22,12 +21,12 @@ class AudioDiarization:
      def __init__(self):
         self.gpu_manager = GPUManager()
         self.device = self.gpu_manager.device
-        self.compute_type = "float16" if torch.cuda.is_available() else "float32"
+        self.compute_type = self.gpu_manager.torch_dtype
         self.cache_dir = HF_HOME
         self._create_directories()
-        
+        self.gpu_manager.clear_gpu('AudioDiarization')
         #with self.gpu_manager.gpu_session(memory_fraction=0.7, component_name="AudioDiarization"):
-        self._init_diarization()
+        #     self._init_diarization()
             
  
      def _create_directories(self):
@@ -48,8 +47,7 @@ class AudioDiarization:
                 # Set the parameters
                 self.pipeline.instantiate({
                     "segmentation": {
-                        "min_duration_off": 1.0  # Set minimum duration to 1 second
-                        
+                        "min_duration_off": 1.0,
                     }
                 })
                 #print(self.pipeline.__doc__)  # Print docstring if available
@@ -60,16 +58,37 @@ class AudioDiarization:
      def Diarization(self, audio_path, output_path):
         """Perform speaker diarization on audio file"""
         try:
-            if not self.pipeline:
-                print("Diarization pipeline not initialized")
-                return None
+            #if not self.pipeline:
+                #print("Diarization pipeline not initialized")
+                #return None
 
             print(f"Starting diarization for {audio_path}")
             
-            with self.gpu_manager.gpu_session(memory_fraction=0.7, component_name="AudioDiarization"):
+            with self.gpu_manager.gpu_session(memory_fraction=0.6, component_name="AudioDiarization"):
                 # Run diarization
+                pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-3.1",
+                    use_auth_token=HF_TOKEN,  # Replace with your token
+                    cache_dir=self.cache_dir,
+                   
+                ).to(self.device)
+                #print(pipeline.__doc__)
+                # Set the parameters
+                pipeline.instantiate({
+                    "segmentation": {
+                        "min_duration_off": 1.0,
+                          
+                    },
+                
+                })
+    
+
                 with ProgressHook() as hook:
-                    diarization = self.pipeline(audio_path, hook=hook, min_speakers=2, max_speakers=5)
+                        diarization = pipeline(
+                            audio_path, 
+                            hook=hook,
+                      
+                        )
                 
                 # Write results
                 full_line = ''

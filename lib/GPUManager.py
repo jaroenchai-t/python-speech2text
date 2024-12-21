@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 import gc
+import os
 
 import torch
 
@@ -12,13 +13,22 @@ class GPUManager:
         if cls._instance is None:
             cls._instance = super(GPUManager, cls).__new__(cls)
             cls._instance._initialize()
+            config=os.getenv("PYTORCH_CUDA_ALLOC_CONF")
+            print(f"*********** PYTORCH_CUDA_ALLOC_CONF: {config} ******************")
         return cls._instance
 
     def _initialize(self):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
         self.is_gpu_in_use = False
-
+    def clear_gpu(self,component_name):
+         if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.set_per_process_memory_fraction(1.0)
+                gc.collect()
+                torch.cuda.synchronize()
+                self.is_gpu_in_use = False
+                print(f"{component_name} released GPU - Current Memory: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
     @contextmanager
     def gpu_session(self, memory_fraction=0.7, component_name=""):
         """Context manager for GPU memory management"""
@@ -34,10 +44,4 @@ class GPUManager:
                 print(f"{component_name} acquired GPU - Reserved Memory: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
             yield
         finally:
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.set_per_process_memory_fraction(1.0)
-                gc.collect()
-                torch.cuda.synchronize()
-                self.is_gpu_in_use = False
-                print(f"{component_name} released GPU - Current Memory: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
+            self.clear_gpu(component_name)

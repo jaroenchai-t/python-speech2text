@@ -3,7 +3,6 @@ import os
 from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
-import torch
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 from pydub import AudioSegment
 
@@ -17,15 +16,12 @@ HF_HOME = os.getenv('HF_HOME')
 class WhisperOpenAI:
     def __init__(self):
         self.gpu_manager = GPUManager()
-        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        self.device =   self.gpu_manager.device
         self.torch_dtype = self.gpu_manager.torch_dtype
         
         self.cache_dir =HF_HOME
         self._create_directories()
-        model_id = "openai/whisper-large-v3-turbo"
-        #model_id = "openai/whisper-large-v3"
-
-        #with self.gpu_manager.gpu_session(memory_fraction=0.8, component_name="WhisperOpenAI"):
+        
         model_id = "openai/whisper-large-v3-turbo"
         model = AutoModelForSpeechSeq2Seq.from_pretrained(
             model_id, 
@@ -43,7 +39,9 @@ class WhisperOpenAI:
             torch_dtype=self.torch_dtype,
             device=self.device,
         )
- 
+        self.gpu_manager.clear_gpu('WhisperOpenAI')
+
+
     def _create_directories(self):
         """Create necessary directories"""
         for dir_path in [self.cache_dir]:
