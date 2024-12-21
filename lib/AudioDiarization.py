@@ -26,8 +26,8 @@ class AudioDiarization:
         self.cache_dir = HF_HOME
         self._create_directories()
         
-        with self.gpu_manager.gpu_session(memory_fraction=0.7, component_name="AudioDiarization"):
-            self._init_diarization()
+        #with self.gpu_manager.gpu_session(memory_fraction=0.7, component_name="AudioDiarization"):
+        self._init_diarization()
             
  
      def _create_directories(self):

@@ -25,24 +25,24 @@ class WhisperOpenAI:
         model_id = "openai/whisper-large-v3-turbo"
         #model_id = "openai/whisper-large-v3"
 
-        with self.gpu_manager.gpu_session(memory_fraction=0.8, component_name="WhisperOpenAI"):
-            model_id = "openai/whisper-large-v3-turbo"
-            model = AutoModelForSpeechSeq2Seq.from_pretrained(
-                model_id, 
-                torch_dtype=self.torch_dtype, 
-                low_cpu_mem_usage=True, 
-                use_safetensors=True
-            )
-            model.to(self.device)
-            processor = AutoProcessor.from_pretrained(model_id, cache_dir=self.cache_dir)
-            self.pipe = pipeline(
-                "automatic-speech-recognition",
-                model=model,
-                tokenizer=processor.tokenizer,
-                feature_extractor=processor.feature_extractor,
-                torch_dtype=self.torch_dtype,
-                device=self.device,
-            )
+        #with self.gpu_manager.gpu_session(memory_fraction=0.8, component_name="WhisperOpenAI"):
+        model_id = "openai/whisper-large-v3-turbo"
+        model = AutoModelForSpeechSeq2Seq.from_pretrained(
+            model_id, 
+            torch_dtype=self.torch_dtype, 
+            low_cpu_mem_usage=True, 
+            use_safetensors=True
+        )
+        model.to(self.device)
+        processor = AutoProcessor.from_pretrained(model_id, cache_dir=self.cache_dir)
+        self.pipe = pipeline(
+            "automatic-speech-recognition",
+            model=model,
+            tokenizer=processor.tokenizer,
+            feature_extractor=processor.feature_extractor,
+            torch_dtype=self.torch_dtype,
+            device=self.device,
+        )
  
     def _create_directories(self):
         """Create necessary directories"""
