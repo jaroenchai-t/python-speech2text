@@ -5,7 +5,7 @@ services:
     #image: registry.gitlab.com/jaroechai/speechtotext:demo
     build:
       context: .  # Uses the current directory as build context
-      dockerfile: Dockerfile  # Specifies which Dockerfile to use
+      #dockerfile: Dockerfile  # Specifies which Dockerfile to use
     ports:
       - "8501:8501"
     volumes:
