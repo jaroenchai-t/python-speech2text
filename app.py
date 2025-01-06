@@ -1,10 +1,10 @@
  
  
-from asyncio import Queue
+from queue import Queue, Empty
 import gc
 import json
 import os
-from threading import Thread
+import threading
 from venv import logger
 import streamlit as st
 import tempfile
@@ -14,7 +14,7 @@ import time
 import uuid
 from TranscriptWorker import TranscriptWorker
 import portalocker
-from streamlit.runtime.scriptrunner import get_script_run_ctx
+from streamlit.runtime.scriptrunner import get_script_run_ctx, add_script_run_ctx
 import torch
 import smtplib
 from email.mime.text import MIMEText
@@ -233,97 +233,84 @@ def send_email(sender_email, app_password, receiver_email, subject, body):
 temp = TempFileManager()
 transcript_worker = TranscriptWorker()
 
-def long_running_process(progress_queue,temp_file_path,user_email):
+def long_running_process(progress_queue, temp_file_path, user_email):
+    ctx = get_script_run_ctx()
+    
+    def _process():
+        add_script_run_ctx(ctx)
+        
         try:
-            # Set the script context for this thread
-            
             # Convert to audio
             print("Converting video to audio...")
             output_audio_path = transcript_worker.process_convert_to_audit(temp_file_path)
             print("Audio conversion complete!")
-                # Diarization
+            
+            # Diarization
             print("Performing diarization...")
             full_text, output_detection_path = transcript_worker.diarization(output_audio_path)
             chunk_output_dir = transcript_worker.splitAudio(output_audio_path, output_detection_path)
             print("Splitting audio into chunks...")
             
-            # Ensure chunk_output_dir is a string path
-            if not isinstance(chunk_output_dir, (str, Path)):
-                # If TranscriptWorker.splitAudio returns an object, it should have a path attribute
-                # Modify this according to your TranscriptWorker implementation
-                chunk_output_dir = str(chunk_output_dir.path if hasattr(chunk_output_dir, 'path') else chunk_output_dir)
-            
-            # Convert to Path object for reliable path handling
             chunk_dir = Path(chunk_output_dir)
             wav_files = sorted([f for f in chunk_dir.glob('*.wav')])
             total_files = len(wav_files)
-            print("Processing audio chunks...")
+            print(f"chunks:{wav_files}")
             current_transcript = []
             for idx, chunk_file in enumerate(wav_files, 1):
                 try:
-                    # Update progress
                     progress = idx / total_files
-                    progress_queue.put(progress)
+                    progress_queue.put(('progress', progress))
                     
-                    
-                    # Process chunk
                     print(f"Processing chunk {idx}/{total_files}: {chunk_file}")
                     raw_text = transcript_worker.transcribe(str(chunk_file))
-                    print(f"Raw text: {raw_text}")
                     clean_repat_text = transcript_worker.clean_repeated_words(raw_text)
-                    print(f"Cleaned text: {clean_repat_text}")
                     text = transcript_worker.clean_thai_repeats(clean_repat_text)
-                    print(f"Final text: {text}")
                     
-                    # Extract speaker info from filename
                     chunk_name = chunk_file.name.split("_")
                     speaker = f"{chunk_name[2]}_{chunk_name[3].split('.')[0]}"
-                    
-                    # Add to transcript
                     chunk_text = f"{speaker}: {text}"
                     current_transcript.append(chunk_text)
-                    
-                
+                    print(f'Transcript:{chunk_text}')
                     
                 except Exception as e:
-                    st.error(f"Error processing chunk {chunk_file.name}: {str(e)}")
+                    progress_queue.put(('error', f"Error processing chunk {chunk_file.name}: {str(e)}"))
             
-            # Final updates
-            progress_queue.put(1.0)
-            
-            print("All chunks processed successfully!")
-        
-            # Save final transcript
             final_transcript = "\n\n".join(current_transcript)
+            progress_queue.put(('complete', final_transcript))
+            
             try:
                 send_email(
-                    sender_email="noreply.jaroenchai@gmail.com",  # Replace with your email
-                    app_password="ckex ochw zlji xyow",     # Replace with your app password
+                    sender_email="noreply.jaroenchai@gmail.com",
+                    app_password="ckex ochw zlji xyow",
                     receiver_email=user_email,
                     subject="Video Processing Complete",
                     body=f"Your video processing is complete.\n\nTranscript:\n\n{final_transcript}"
                 )
-                st.success("Notification email sent successfully!")
             except Exception as e:
-                pass
+                progress_queue.put(('warning', f"Email sending failed: {str(e)}"))
+                
         except Exception as e:
-            print(f"Error processing: {str(e)}")
+            progress_queue.put(('error', str(e)))
+
+    return _process
 
 system_lock = SystemLock();
+# In your main function:
 def main():
     init_session_state()
+    create_config()
+    
     st.title("Video Processing Pipeline")
-    # Initialize system lock
+    
     if 'system_lock' not in st.session_state:
         st.session_state.system_lock = system_lock
 
-    # Generate unique user ID if not exists
-    if 'user_id' not in st.session_state:
-        st.session_state.user_id = str(uuid.uuid4())
+    try:
+        status = st.session_state.system_lock.get_status()
+    except Exception as e:
+        st.error(f"Error getting system status: {str(e)}")
+        return
 
-    # Get current system status
-    status = st.session_state.system_lock.get_status()
-       # Display system status in sidebar
     if status['is_busy']:
         st.sidebar.error("🔴 System Busy")
         st.sidebar.write(f"Started: {status['start_time']}")
@@ -331,234 +318,59 @@ def main():
     else:
         st.sidebar.success("🟢 System Ready")
         email = st.text_input("Enter your email address", key="email_input")
-        uploaded_file = st.file_uploader("Choose a video file", type=['mp4', 'avi', 'mov'])
-        if uploaded_file:
-            #file_size = get_file_size_display(uploaded_file.size)
-            #st.info(f"Uploaded file size: {file_size}")
-            # Add email input field
-            
-        # Check if system is busy
-            if status['is_busy']:
-                if status['current_user'] != st.session_state.user_id:
-                    st.warning("⚠️ System is currently processing another request. Please wait and try again later.")
-                    st.info(f"Estimated wait time: {status['estimated_time']} minutes")
-                    return
-            
-            # Validate email format
-            is_valid_email = True
-            # if email:
-            #     import re
-            #     email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-            #     is_valid_email = bool(re.match(email_pattern, email))
-            #     if not is_valid_email:
-            #         st.error("Please enter a valid email address")
-            # else:
-            #     st.error("Email is required")
+        
+        with st.form("upload_form"):
+            uploaded_file = st.file_uploader("Choose a video file", type=['mp4', 'avi', 'mov'])
+            submit_button = st.form_submit_button("Process Video")
 
-            if st.button("Process Video") and is_valid_email:
-                if not status['is_busy']:
-                    # Clean temp directory on startup
-                    temp.cleanup_directory()
+            if submit_button and uploaded_file is not None:
+                progress_placeholder = st.empty()
+                progress_bar = st.progress(0)
+                
+                progress_queue = Queue()
+                try:
+                    temp_file_path = temp.save_uploaded_file(uploaded_file)
+                    progress_placeholder.success("Video uploaded successfully!")
+                    st.video(str(temp_file_path))
+
+                    ctx = get_script_run_ctx()
+                    process_func = long_running_process(progress_queue, temp_file_path, email)
+                    thread = threading.Thread(target=process_func)
+                    thread.daemon = True
+                    add_script_run_ctx(ctx)
+                    thread.start()
+
+                    while thread.is_alive():
+                        try:
+                            msg_type, msg_data = progress_queue.get(timeout=1.0)
+                            
+                            if msg_type == 'progress':
+                                progress_bar.progress(msg_data)
+                            elif msg_type == 'error':
+                                progress_placeholder.error(msg_data)
+                                break
+                            elif msg_type == 'warning':
+                                progress_placeholder.warning(msg_data)
+                            elif msg_type == 'complete':
+                                progress_bar.progress(1.0)
+                                progress_placeholder.success("Process Complete!")
+                                st.text_area("Transcript", msg_data, height=300)
+                                
+                        except Empty:
+                            continue
+                        except Exception as e:
+                            progress_placeholder.error(f"Error: {str(e)}")
+                            break
+
+                    thread.join(timeout=1.0)
+                    
+                except Exception as e:
+                    progress_placeholder.error(f"Error: {str(e)}")
+                finally:
+                    system_lock.release()
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
                         gc.collect()
-
-                    # Set system as busy
-                    estimated_time = len(uploaded_file.getvalue()) / (1024 * 1024 * 60)  # Rough estimate
-                    st.session_state.system_lock.set_busy(st.session_state.user_id, estimated_time)
-                    st.session_state.user_email = email
-
-                    status_placeholder = st.empty()
-                    #progress_text = st.empty()
-                    progress_bar = st.progress(0)
-                    #transcript_container = st.empty()
-                    progress_queue = Queue()
-                    ctx = get_script_run_ctx()
-                    
-                    try:
-                    
-                        # Save file to temp directory
-                        temp_file_path = temp.save_uploaded_file(uploaded_file)
-                        status_placeholder.success("Video uploaded successfully!")
-                        st.video(str(temp_file_path))
-                        # Start process in background
-                        thread = Thread(target=long_running_process, args=(progress_queue,temp_file_path,email))
-                        thread.start()
-                        # Update progress bar
-                        while thread.is_alive():
-                            try:
-                                progress = progress_queue.get()
-                                progress_bar.progress(progress)
-                            except Exception as e:
-                                time.sleep(0.1)
-                            
-                        thread.join()
-                        st.success("Process Complete!")
-                    except Exception as e:
-                        status_placeholder.error(f"Error during processing: {str(e)}")
-                    finally:
-                        # Release system busy status
-                        system_lock.release()
-
-def main1():
-    init_session_state()
-    st.title("Video Processing Pipeline")
-    # Initialize system lock
-    if 'system_lock' not in st.session_state:
-        st.session_state.system_lock = system_lock
-
-    # Generate unique user ID if not exists
-    if 'user_id' not in st.session_state:
-        st.session_state.user_id = str(uuid.uuid4())
-
-    # Get current system status
-    status = st.session_state.system_lock.get_status()
-       # Display system status in sidebar
-    if status['is_busy']:
-        st.sidebar.error("🔴 System Busy")
-        st.sidebar.write(f"Started: {status['start_time']}")
-        st.sidebar.write(f"Estimated time: {status['estimated_time']} minutes")
-    else:
-        st.sidebar.success("🟢 System Ready")
-    
-    
-    uploaded_file = st.file_uploader("Choose a video file", type=['mp4', 'avi', 'mov'])
-    
-    if uploaded_file:
-        file_size = get_file_size_display(uploaded_file.size)
-        st.info(f"Uploaded file size: {file_size}")
-         # Add email input field
-        email = st.text_input("Enter your email address", key="email_input")
-      # Check if system is busy
-        if status['is_busy']:
-            if status['current_user'] != st.session_state.user_id:
-                st.warning("⚠️ System is currently processing another request. Please wait and try again later.")
-                st.info(f"Estimated wait time: {status['estimated_time']} minutes")
-                return
-        
-        if st.button("Process Video"):
-            if not status['is_busy']:
-                # Clean temp directory on startup
-                temp.cleanup_directory()
-                # Set system as busy
-                estimated_time = len(uploaded_file.getvalue()) / (1024 * 1024 * 60)  # Rough estimate
-                st.session_state.system_lock.set_busy(st.session_state.user_id, estimated_time)
-                st.session_state.user_email = email
-
-                status_placeholder = st.empty()
-                progress_text = st.empty()
-                progress_bar = st.progress(0)
-                transcript_container = st.empty()
-                
-                try:
-                  
-                    # Save file to temp directory
-                    temp_file_path = temp.save_uploaded_file(uploaded_file)
-                    status_placeholder.success("Video uploaded successfully!")
-                    st.video(str(temp_file_path))
-
-                    # Convert to audio
-                    status_placeholder.info("Converting video to audio...")
-                    output_audio_path = transcript_worker.process_convert_to_audit(temp_file_path)
-                    if not output_audio_path:
-                        raise Exception("Failed to convert video to audio")
-                    
-                    st.audio(output_audio_path)
-                    status_placeholder.success("Audio conversion complete!")
-
-                    # Diarization
-                    status_placeholder.info("Performing diarization...")
-                    full_text, output_detection_path = transcript_worker.diarization(output_audio_path)
-                    st.write("### Diarization Results:")
-                    st.write(full_text)
-
-                    # Split audio
-                    status_placeholder.info("Splitting audio into chunks...")
-                    chunk_output_dir = transcript_worker.splitAudio(output_audio_path, output_detection_path)
-                    
-                    # Ensure chunk_output_dir is a string path
-                    if not isinstance(chunk_output_dir, (str, Path)):
-                        # If TranscriptWorker.splitAudio returns an object, it should have a path attribute
-                        # Modify this according to your TranscriptWorker implementation
-                        chunk_output_dir = str(chunk_output_dir.path if hasattr(chunk_output_dir, 'path') else chunk_output_dir)
-                    
-                    # Convert to Path object for reliable path handling
-                    chunk_dir = Path(chunk_output_dir)
-                    
-                    # Get all WAV files in the chunk directory
-                    wav_files = sorted([f for f in chunk_dir.glob('*.wav')])
-                    total_files = len(wav_files)
-                    
-                    if total_files == 0:
-                        raise Exception("No audio chunks found for processing")
-
-                    status_placeholder.info("Processing audio chunks...")
-                    current_transcript = []
-                    
-                    for idx, chunk_file in enumerate(wav_files, 1):
-                        try:
-                            # Update progress
-                            progress = idx / total_files
-                            progress_bar.progress(progress)
-                            progress_text.text(f"Processing chunk {idx}/{total_files}")
-                            
-                            # Process chunk
-                            print(f"Processing chunk {idx}/{total_files}: {chunk_file}")
-                            raw_text = transcript_worker.transcribe(str(chunk_file))
-                            print(f"Raw text: {raw_text}")
-                            clean_repat_text = transcript_worker.clean_repeated_words(raw_text)
-                            print(f"Cleaned text: {clean_repat_text}")
-                            text = transcript_worker.clean_thai_repeats(clean_repat_text)
-                            print(f"Final text: {text}")
-                            
-                            # Extract speaker info from filename
-                            chunk_name = chunk_file.name.split("_")
-                            speaker = f"{chunk_name[2]}_{chunk_name[3].split('.')[0]}"
-                            
-                            # Add to transcript
-                            chunk_text = f"{speaker}: {text}"
-                            current_transcript.append(chunk_text)
-                            
-                            # Update display
-                            transcript_container.markdown("\n\n".join(current_transcript))
-                            
-                        except Exception as e:
-                            st.error(f"Error processing chunk {chunk_file.name}: {str(e)}")
-                    
-                    # Final updates
-                    progress_bar.progress(1.0)
-                    progress_text.text("Processing complete!")
-                    status_placeholder.success("All chunks processed successfully!")
-                    
-                    # Save final transcript
-                    final_transcript = "\n\n".join(current_transcript)
-                    try:
-                        send_email(
-                            sender_email="noreply.jaroenchai@gmail.com",  # Replace with your email
-                            app_password="ckex ochw zlji xyow",     # Replace with your app password
-                            receiver_email=st.session_state.user_email,
-                            subject="Video Processing Complete",
-                            body=f"Your video processing is complete.\n\nTranscript:\n\n{final_transcript}"
-                        )
-                        st.success("Notification email sent successfully!")
-                    except Exception as e:
-                        st.warning(f"Could not send email notification: {str(e)}")
-
-                    st.download_button(
-                        label="Download Transcript",
-                        data=final_transcript,
-                        file_name="transcript.txt",
-                        mime="text/plain"
-                    )
-
-                except Exception as e:
-                    st.session_state.system_lock.release()
-                    status_placeholder.error(f"Error during processing: {str(e)}")
-                    raise e  # Re-raise to see full traceback in terminal
-                finally:
-                    # Release system busy status
-                    st.session_state.system_lock.release()
- 
 
 if __name__ == "__main__":
     main()
