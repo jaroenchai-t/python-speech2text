@@ -1,15 +1,25 @@
  
  
+from asyncio import Queue
+import gc
 import json
 import os
+from threading import Thread
 from venv import logger
 import streamlit as st
 import tempfile
 from pathlib import Path
 from datetime import datetime
+import time 
 import uuid
 from TranscriptWorker import TranscriptWorker
 import portalocker
+from streamlit.runtime.scriptrunner import get_script_run_ctx
+import torch
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
 # File handling configurations
 MAX_FILE_SIZE = 1024 * 1024 * 1024  # 1GB
 CHUNK_SIZE = 64 * 1024 * 1024  # 64MB chunks
@@ -29,7 +39,15 @@ def init_session_state():
 
 
 class SystemLock:
-    def __init__(self):
+    _instance = None
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(SystemLock, cls).__new__(cls)
+            cls._instance._initialize()
+            config=os.getenv("PYTORCH_CUDA_ALLOC_CONF")
+            print(f"*********** PYTORCH_CUDA_ALLOC_CONF: {config} ******************")
+        return cls._instance
+    def _initialize(self):
         self.lock_file = Path(tempfile.gettempdir()) / 'system_lock.json'
         self.lock_handle = None
         if not self.lock_file.exists():
@@ -194,15 +212,200 @@ serverTimeout = 300  # Timeout in seconds
     
     with open(config_file, 'w') as f:
         f.write(config_content)
+def send_email(sender_email, app_password, receiver_email, subject, body):
+    message = MIMEMultipart()
+    message["From"] = sender_email
+    message["To"] = receiver_email
+    message["Subject"] = subject
+    message.attach(MIMEText(body, "plain"))
+
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(sender_email, app_password)
+            text = message.as_string()
+            server.sendmail(sender_email, receiver_email, text)
+            return True
+    except Exception as e:
+        print(f"Error sending email: {e}")
+        return False
 
 temp = TempFileManager()
 transcript_worker = TranscriptWorker()
+
+def long_running_process(progress_queue,temp_file_path,user_email):
+        try:
+            # Set the script context for this thread
+            
+            # Convert to audio
+            print("Converting video to audio...")
+            output_audio_path = transcript_worker.process_convert_to_audit(temp_file_path)
+            print("Audio conversion complete!")
+                # Diarization
+            print("Performing diarization...")
+            full_text, output_detection_path = transcript_worker.diarization(output_audio_path)
+            chunk_output_dir = transcript_worker.splitAudio(output_audio_path, output_detection_path)
+            print("Splitting audio into chunks...")
+            
+            # Ensure chunk_output_dir is a string path
+            if not isinstance(chunk_output_dir, (str, Path)):
+                # If TranscriptWorker.splitAudio returns an object, it should have a path attribute
+                # Modify this according to your TranscriptWorker implementation
+                chunk_output_dir = str(chunk_output_dir.path if hasattr(chunk_output_dir, 'path') else chunk_output_dir)
+            
+            # Convert to Path object for reliable path handling
+            chunk_dir = Path(chunk_output_dir)
+            wav_files = sorted([f for f in chunk_dir.glob('*.wav')])
+            total_files = len(wav_files)
+            print("Processing audio chunks...")
+            current_transcript = []
+            for idx, chunk_file in enumerate(wav_files, 1):
+                try:
+                    # Update progress
+                    progress = idx / total_files
+                    progress_queue.put(progress)
+                    
+                    
+                    # Process chunk
+                    print(f"Processing chunk {idx}/{total_files}: {chunk_file}")
+                    raw_text = transcript_worker.transcribe(str(chunk_file))
+                    print(f"Raw text: {raw_text}")
+                    clean_repat_text = transcript_worker.clean_repeated_words(raw_text)
+                    print(f"Cleaned text: {clean_repat_text}")
+                    text = transcript_worker.clean_thai_repeats(clean_repat_text)
+                    print(f"Final text: {text}")
+                    
+                    # Extract speaker info from filename
+                    chunk_name = chunk_file.name.split("_")
+                    speaker = f"{chunk_name[2]}_{chunk_name[3].split('.')[0]}"
+                    
+                    # Add to transcript
+                    chunk_text = f"{speaker}: {text}"
+                    current_transcript.append(chunk_text)
+                    
+                
+                    
+                except Exception as e:
+                    st.error(f"Error processing chunk {chunk_file.name}: {str(e)}")
+            
+            # Final updates
+            progress_queue.put(1.0)
+            
+            print("All chunks processed successfully!")
+        
+            # Save final transcript
+            final_transcript = "\n\n".join(current_transcript)
+            try:
+                send_email(
+                    sender_email="noreply.jaroenchai@gmail.com",  # Replace with your email
+                    app_password="ckex ochw zlji xyow",     # Replace with your app password
+                    receiver_email=user_email,
+                    subject="Video Processing Complete",
+                    body=f"Your video processing is complete.\n\nTranscript:\n\n{final_transcript}"
+                )
+                st.success("Notification email sent successfully!")
+            except Exception as e:
+                pass
+        except Exception as e:
+            print(f"Error processing: {str(e)}")
+
+system_lock = SystemLock();
 def main():
     init_session_state()
     st.title("Video Processing Pipeline")
     # Initialize system lock
     if 'system_lock' not in st.session_state:
-        st.session_state.system_lock = SystemLock()
+        st.session_state.system_lock = system_lock
+
+    # Generate unique user ID if not exists
+    if 'user_id' not in st.session_state:
+        st.session_state.user_id = str(uuid.uuid4())
+
+    # Get current system status
+    status = st.session_state.system_lock.get_status()
+       # Display system status in sidebar
+    if status['is_busy']:
+        st.sidebar.error("🔴 System Busy")
+        st.sidebar.write(f"Started: {status['start_time']}")
+        st.sidebar.write(f"Estimated time: {status['estimated_time']} minutes")
+    else:
+        st.sidebar.success("🟢 System Ready")
+        email = st.text_input("Enter your email address", key="email_input")
+        uploaded_file = st.file_uploader("Choose a video file", type=['mp4', 'avi', 'mov'])
+        if uploaded_file:
+            #file_size = get_file_size_display(uploaded_file.size)
+            #st.info(f"Uploaded file size: {file_size}")
+            # Add email input field
+            
+        # Check if system is busy
+            if status['is_busy']:
+                if status['current_user'] != st.session_state.user_id:
+                    st.warning("⚠️ System is currently processing another request. Please wait and try again later.")
+                    st.info(f"Estimated wait time: {status['estimated_time']} minutes")
+                    return
+            
+            # Validate email format
+            is_valid_email = True
+            # if email:
+            #     import re
+            #     email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+            #     is_valid_email = bool(re.match(email_pattern, email))
+            #     if not is_valid_email:
+            #         st.error("Please enter a valid email address")
+            # else:
+            #     st.error("Email is required")
+
+            if st.button("Process Video") and is_valid_email:
+                if not status['is_busy']:
+                    # Clean temp directory on startup
+                    temp.cleanup_directory()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        gc.collect()
+
+                    # Set system as busy
+                    estimated_time = len(uploaded_file.getvalue()) / (1024 * 1024 * 60)  # Rough estimate
+                    st.session_state.system_lock.set_busy(st.session_state.user_id, estimated_time)
+                    st.session_state.user_email = email
+
+                    status_placeholder = st.empty()
+                    #progress_text = st.empty()
+                    progress_bar = st.progress(0)
+                    #transcript_container = st.empty()
+                    progress_queue = Queue()
+                    ctx = get_script_run_ctx()
+                    
+                    try:
+                    
+                        # Save file to temp directory
+                        temp_file_path = temp.save_uploaded_file(uploaded_file)
+                        status_placeholder.success("Video uploaded successfully!")
+                        st.video(str(temp_file_path))
+                        # Start process in background
+                        thread = Thread(target=long_running_process, args=(progress_queue,temp_file_path,email))
+                        thread.start()
+                        # Update progress bar
+                        while thread.is_alive():
+                            try:
+                                progress = progress_queue.get()
+                                progress_bar.progress(progress)
+                            except Exception as e:
+                                time.sleep(0.1)
+                            
+                        thread.join()
+                        st.success("Process Complete!")
+                    except Exception as e:
+                        status_placeholder.error(f"Error during processing: {str(e)}")
+                    finally:
+                        # Release system busy status
+                        system_lock.release()
+
+def main1():
+    init_session_state()
+    st.title("Video Processing Pipeline")
+    # Initialize system lock
+    if 'system_lock' not in st.session_state:
+        st.session_state.system_lock = system_lock
 
     # Generate unique user ID if not exists
     if 'user_id' not in st.session_state:
@@ -224,6 +427,8 @@ def main():
     if uploaded_file:
         file_size = get_file_size_display(uploaded_file.size)
         st.info(f"Uploaded file size: {file_size}")
+         # Add email input field
+        email = st.text_input("Enter your email address", key="email_input")
       # Check if system is busy
         if status['is_busy']:
             if status['current_user'] != st.session_state.user_id:
@@ -238,7 +443,7 @@ def main():
                 # Set system as busy
                 estimated_time = len(uploaded_file.getvalue()) / (1024 * 1024 * 60)  # Rough estimate
                 st.session_state.system_lock.set_busy(st.session_state.user_id, estimated_time)
-                
+                st.session_state.user_email = email
 
                 status_placeholder = st.empty()
                 progress_text = st.empty()
@@ -327,6 +532,18 @@ def main():
                     
                     # Save final transcript
                     final_transcript = "\n\n".join(current_transcript)
+                    try:
+                        send_email(
+                            sender_email="noreply.jaroenchai@gmail.com",  # Replace with your email
+                            app_password="ckex ochw zlji xyow",     # Replace with your app password
+                            receiver_email=st.session_state.user_email,
+                            subject="Video Processing Complete",
+                            body=f"Your video processing is complete.\n\nTranscript:\n\n{final_transcript}"
+                        )
+                        st.success("Notification email sent successfully!")
+                    except Exception as e:
+                        st.warning(f"Could not send email notification: {str(e)}")
+
                     st.download_button(
                         label="Download Transcript",
                         data=final_transcript,
